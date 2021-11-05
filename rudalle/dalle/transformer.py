@@ -221,7 +221,7 @@ class DalleSelfAttention(torch.nn.Module):
     def _transpose_for_scores(self, tensor):
         """ Transpose a 3D tensor [b, s, np*hn] into a 4D tensor with size [b, np, s, hn]. """
         new_tensor_shape = tensor.size()[:-1] + (self.num_attention_heads, self.hidden_size_per_attention_head)
-        tensor = tensor.view(*new_tensor_shape)
+        tensor = tensor.view(new_tensor_shape[0], new_tensor_shape[1], new_tensor_shape[2], new_tensor_shape[3])
         return tensor.permute(0, 2, 1, 3)
 
     def _calculate_attention_scores(self, query_layer, key_layer, ltor_mask):
