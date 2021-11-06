@@ -39,6 +39,8 @@ class DalleModel(torch.nn.Module):
         self.total_vocab_size = vocab_size + image_vocab_size
         self.vocab_size = vocab_size
         self.loss_img_weight = loss_img_weight
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
 
         # TODO "to"
         mask_map = self.prepare_image_masks(num_layers, text_seq_length, image_tokens_per_dim)
@@ -119,10 +121,12 @@ class DalleModel(torch.nn.Module):
             input_ids,
             attention_mask,
             caches,
-            use_cache: bool=False
+            use_cache: bool=False,
+            fast_convert: bool=False
     ):
-        text = input_ids[:, :self.text_seq_length]
-        text_range = torch.arange(self.text_seq_length, device=self.device)
+        text_seq_length = 1 if fast_convert else self.text_seq_length
+        text = input_ids[:, :text_seq_length]
+        text_range = torch.arange(text_seq_length, device=self.device)
         text_range += (self.vocab_size - self.text_seq_length)
         text = torch.where(text == 0, text_range, text)
         # some hardcode :)
@@ -130,7 +134,7 @@ class DalleModel(torch.nn.Module):
         text_embeddings = self.text_embeddings(text) + \
             self.text_pos_embeddings(torch.arange(text.shape[1], device=self.device))
 
-        image_input_ids = input_ids[:, self.text_seq_length:]
+        image_input_ids = input_ids[:, text_seq_length:]
 
         if exists(image_input_ids) and not is_empty(image_input_ids):
             image_embeddings = self.image_embeddings(image_input_ids) + \
@@ -191,7 +195,8 @@ class DalleModel(torch.nn.Module):
             input_ids,
             attention_mask,
             caches=[],
-            use_cache: bool=False
+            use_cache: bool=False,
+            fast_convert: bool=False
     ):
         assert hasattr(self, 'ort_sess')
         import numpy as np
@@ -207,7 +212,8 @@ class DalleModel(torch.nn.Module):
             'input_ids': input_ids.detach().cpu().numpy(),
             'attention_mask': attention_mask.detach().cpu().numpy(), 
             'caches': caches.detach().cpu().numpy(),
-            'use_cache': np.asarray(use_cache)
+            'use_cache': np.asarray(use_cache),
+            'fast_convert': np.asarray(fast_convert)
         }
 
         logits, present_caches = self.ort_sess.run(None, inputs)
