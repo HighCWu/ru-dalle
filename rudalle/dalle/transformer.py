@@ -72,14 +72,16 @@ class DalleTransformer(torch.nn.Module):
 
     def forward(self, hidden_states, attention_mask, caches, use_cache: bool=False):
         base = self.hidden_size * 4
-        new_caches = torch.zeros(base*len(self.layers), hidden_states.shape[0], hidden_states.shape[1])
+        new_caches = torch.zeros(
+            base*len(self.layers), hidden_states.shape[0], hidden_states.shape[1], dtype=hidden_states.dtype, device=hidden_states.device
+        )
         for i, layer in enumerate(self.layers):
             mask = attention_mask
             if len(self._mask_map):
                 layer_mask = self._mask_map[i][:mask.size(2), :mask.size(3)]
                 mask = torch.mul(attention_mask, layer_mask)
             hidden_states, present_caches = layer(
-                hidden_states, mask, caches=caches[i*base:(i+1)*base], use_cache=use_cache
+                hidden_states, mask, caches[i*base:(i+1)*base], use_cache=use_cache
             )
             new_caches[i*base:(i+1)*base] = present_caches
         output = self.final_layernorm(hidden_states)

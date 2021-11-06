@@ -47,7 +47,7 @@ def generate_images(text, tokenizer, dalle, vae, top_k, top_p, images_num, image
                 if image_prompts is not None and idx in prompts_idx:
                     out = torch.cat((out, prompts[:, idx].unsqueeze(1)), dim=-1)
                 else:
-                    logits, caches = dalle(out, attention_mask, caches=caches, use_cache=use_cache if i else False)
+                    logits, caches = dalle(out, attention_mask, caches, use_cache=use_cache if i else False)
                     logits = logits[:, -1, vocab_size:]
                     logits /= temperature
                     filtered_logits = transformers.top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)
