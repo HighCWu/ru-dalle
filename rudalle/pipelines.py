@@ -30,7 +30,7 @@ def generate_images(text, tokenizer, dalle, vae, top_k, top_p, images_num, image
         with torch.no_grad():
             attention_mask = torch.tril(torch.ones((chunk_bs, 1, total_seq_length, total_seq_length), device=device))
             out = input_ids.unsqueeze(0).repeat(chunk_bs, 1).to(device)
-            has_cache = False
+            caches = []
             sample_scores = []
             if image_prompts is not None:
                 prompts_idx, prompts = image_prompts.image_prompts_idx, image_prompts.image_prompts
@@ -38,13 +38,13 @@ def generate_images(text, tokenizer, dalle, vae, top_k, top_p, images_num, image
                 if use_cache:
                     use_cache = False
                     print('Warning: use_cache changed to False')
-            for idx in tqdm(range(out.shape[1], total_seq_length)):
+            for i, idx in enumerate(tqdm(range(out.shape[1], total_seq_length))):
                 idx -= text_seq_length
                 if image_prompts is not None and idx in prompts_idx:
                     out = torch.cat((out, prompts[:, idx].unsqueeze(1)), dim=-1)
                 else:
-                    logits, has_cache = dalle(out, attention_mask,
-                                              has_cache=has_cache, use_cache=use_cache, return_loss=False)
+                    logits, caches = dalle(out, attention_mask,
+                                              caches=caches, use_cache=use_cache if i else False, return_loss=False)
                     logits = logits[:, -1, vocab_size:]
                     logits /= temperature
                     filtered_logits = transformers.top_k_top_p_filtering(logits, top_k=top_k, top_p=top_p)

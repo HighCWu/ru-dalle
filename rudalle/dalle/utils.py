@@ -7,7 +7,7 @@ def exists(val):
 
 
 def is_empty(t):
-    return t.nelement() == 0
+    return t.numel() == 0
 
 
 def ensure_divisibility(numerator, denominator):

@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch.nn import LayerNorm
+from typing import List
 
 from .utils import divide, split_tensor_along_last_dim
 
@@ -67,15 +68,17 @@ class DalleTransformer(torch.nn.Module):
         # Final layer norm before output.
         self.final_layernorm = LayerNorm(hidden_size, eps=layernorm_epsilon)
 
-    def forward(self, hidden_states, attention_mask, has_cache, use_cache):
+    def forward(self, hidden_states, attention_mask, caches: List[torch.Tensor], use_cache: bool=False):
+        new_caches = []
         for i, layer in enumerate(self.layers):
             mask = attention_mask
             if len(self._mask_map):
                 layer_mask = self._mask_map[i][:mask.size(2), :mask.size(3)]
                 mask = torch.mul(attention_mask, layer_mask)
-            hidden_states, present_has_cache = layer(hidden_states, mask, has_cache=has_cache, use_cache=use_cache)
+            hidden_states, present_caches = layer(hidden_states, mask, caches=caches[i*4:(i+1)*4], use_cache=use_cache)
+            new_caches += present_caches
         output = self.final_layernorm(hidden_states)
-        return output, present_has_cache
+        return output, new_caches
 
 
 class DalleTransformerLayer(torch.nn.Module):
@@ -138,7 +141,7 @@ class DalleTransformerLayer(torch.nn.Module):
         # MLP
         self.mlp = DalleMLP(hidden_size, output_dropout_prob)
 
-    def forward(self, hidden_states, ltor_mask, has_cache, use_cache):
+    def forward(self, hidden_states, ltor_mask, caches: List[torch.Tensor], use_cache: bool=False):
         # hidden_states: [b, s, h]
         # ltor_mask: [1, 1, s, s]
 
@@ -146,8 +149,8 @@ class DalleTransformerLayer(torch.nn.Module):
         layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
-        attention_output, att_has_cache = self.attention(
-            layernorm_output, ltor_mask, has_cache=has_cache, use_cache=use_cache)
+        attention_output, att_caches = self.attention(
+            layernorm_output, ltor_mask, caches=caches, use_cache=use_cache)
 
         if self.cogview_sandwich_layernorm:
             attention_output = self.before_first_addition_layernorm(attention_output)
@@ -159,8 +162,8 @@ class DalleTransformerLayer(torch.nn.Module):
         layernorm_output = self.post_attention_layernorm(layernorm_input)
 
         # MLP.
-        mlp_output, mlp_has_cache = self.mlp(
-            layernorm_output, has_cache=has_cache, use_cache=use_cache)
+        mlp_output, mlp_caches = self.mlp(
+            layernorm_output, caches=caches, use_cache=use_cache)
 
         if self.cogview_sandwich_layernorm:
             mlp_output = self.before_second_addition_layernorm(mlp_output)
@@ -168,7 +171,7 @@ class DalleTransformerLayer(torch.nn.Module):
         # Second residual connection.
         output = layernorm_input + mlp_output
 
-        return output, att_has_cache and mlp_has_cache
+        return output, att_caches + mlp_caches
 
 
 class DalleSelfAttention(torch.nn.Module):
@@ -213,11 +216,6 @@ class DalleSelfAttention(torch.nn.Module):
         self.dense = torch.nn.Linear(hidden_size, hidden_size)
         self.output_dropout = torch.nn.Dropout(output_dropout_prob)
 
-        # Cache
-        self.past_key = None
-        self.past_value = None
-        self.past_output = None
-
     def _transpose_for_scores(self, tensor):
         """ Transpose a 3D tensor [b, s, np*hn] into a 4D tensor with size [b, np, s, hn]. """
         new_tensor_shape = tensor.size()[:-1] + (self.num_attention_heads, self.hidden_size_per_attention_head)
@@ -248,11 +246,11 @@ class DalleSelfAttention(torch.nn.Module):
             attention_scores = (attention_scores_scaled - attention_scores_scaled_maxes) * alpha
         return attention_scores
 
-    def forward(self, hidden_states, ltor_mask, has_cache=False, use_cache=False,):
+    def forward(self, hidden_states, ltor_mask, caches: List[torch.Tensor], use_cache: bool=False):
         # hidden_states: [b, s, h]
         # ltor_mask: [1, 1, s, s]
         # Attention heads. [b, s, hp]
-        if has_cache and use_cache:
+        if use_cache:
             mixed_x_layer = self.query_key_value(hidden_states[:, -1:, :])
         else:
             mixed_x_layer = self.query_key_value(hidden_states)
@@ -265,10 +263,10 @@ class DalleSelfAttention(torch.nn.Module):
         key_layer = self._transpose_for_scores(mixed_key_layer)
         value_layer = self._transpose_for_scores(mixed_value_layer)
 
-        # Can be simplified, but I didn't for readability's sake
-        if use_cache and has_cache:
-            key_layer = torch.cat((self.past_key, key_layer), dim=-2)
-            value_layer = torch.cat((self.past_value, value_layer), dim=-2)
+        if use_cache:
+            past_key, past_value = caches[0], caches[1]
+            key_layer = torch.cat((past_key, key_layer), dim=-2)
+            value_layer = torch.cat((past_value, value_layer), dim=-2)
             attention_scores = self._calculate_attention_scores(
                 query_layer=query_layer, key_layer=key_layer, ltor_mask=ltor_mask
             )
@@ -276,21 +274,14 @@ class DalleSelfAttention(torch.nn.Module):
             attention_scores = self._calculate_attention_scores(
                 query_layer=query_layer, key_layer=key_layer, ltor_mask=ltor_mask
             )
+        past_key = key_layer
+        past_value = value_layer
 
         if use_cache:
-            self.past_key = key_layer
-            self.past_value = value_layer
-        else:
-            self.past_key = None
-            self.past_value = None
-            self.past_output = None
-            has_cache = False
-
-        if use_cache and has_cache:
             attention_scores = attention_scores[..., -1:, :]
 
         # Attention probabilities. [b, np, s, s]
-        attention_probs = torch.nn.Softmax(dim=-1)(attention_scores)
+        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -305,22 +296,19 @@ class DalleSelfAttention(torch.nn.Module):
 
         new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size,)
         # [b, s, hp]
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.view(new_context_layer_shape[0], new_context_layer_shape[1], new_context_layer_shape[2])
 
         # Output. [b, s, h]
         output = self.dense(context_layer)
 
         if use_cache:
-            # Can be simplified, but I didn't for readability's sake
-            if has_cache:
-                output = torch.cat((self.past_output, output), dim=-2)
-                self.past_output = output
-            else:
-                self.past_output = output
-            has_cache = True
+            past_output = caches[2]
+            output = torch.cat((past_output, output), dim=-2)
+        
+        past_output = output
 
         output = self.output_dropout(output)
-        return output, has_cache
+        return output, [past_key, past_value, past_output]
 
 
 class DalleMLP(torch.nn.Module):
@@ -345,8 +333,8 @@ class DalleMLP(torch.nn.Module):
         # MLP cache
         self.past_x = None
 
-    def forward(self, hidden_states, has_cache=False, use_cache=False):
-        if has_cache and use_cache:
+    def forward(self, hidden_states, caches: List[torch.Tensor], use_cache: bool=False):
+        if use_cache:
             hidden_states = hidden_states[:, -1:]
 
         # [b, s, 4hp]
@@ -355,17 +343,10 @@ class DalleMLP(torch.nn.Module):
         # [b, s, h]
         x = self.dense_4h_to_h(x)
         if use_cache:
-            # Can be simplified, but I didn't for readability's sake
-            if has_cache:
-                x = torch.cat((self.past_x, x), dim=-2)
-                self.past_x = x
-            else:
-                self.past_x = x
-
-            has_cache = True
-        else:
-            self.past_x = None
-            has_cache = False
+            past_x = caches[-1]
+            x = torch.cat((past_x, x), dim=-2)
+        past_x = x
+        
         output = self.dropout(x)
 
-        return output, has_cache
+        return output, [past_x]

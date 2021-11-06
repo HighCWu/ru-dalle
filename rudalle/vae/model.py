@@ -28,13 +28,13 @@ class VQGanGumbelVAE(torch.nn.Module):
     def get_codebook_indices(self, img):
         img = (2 * img) - 1
         _, _, [_, _, indices] = self.model.encode(img)
-        return rearrange(indices, 'b h w -> b (h w)')
+        return indices.reshape(indices.shape[0], -1) # rearrange(indices, 'b h w -> b (h w)')
 
     def decode(self, img_seq):
         b, n = img_seq.shape
         one_hot_indices = torch.nn.functional.one_hot(img_seq, num_classes=self.num_tokens).float()
         z = (one_hot_indices @ self.model.quantize.embed.weight)
-        z = rearrange(z, 'b (h w) c -> b c h w', h=int(sqrt(n)))
+        z = z.reshape(b, int(sqrt(n)), int(sqrt(n)), -1).permute(0,3,1,2) # rearrange(z, 'b (h w) c -> b c h w', h=int(sqrt(n)))
         img = self.model.decode(z)
         img = (img.clamp(-1., 1.) + 1) * 0.5
         return img
