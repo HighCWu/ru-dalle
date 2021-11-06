@@ -11,7 +11,7 @@ from . import utils
 
 
 def generate_images(text, tokenizer, dalle, vae, top_k, top_p, images_num, image_prompts=None, temperature=1.0, bs=8,
-                    seed=None, use_cache=True):
+                    seed=None, use_cache=True, use_onnx=False):
     # TODO docstring
     if seed is not None:
         utils.seed_everything(seed)
@@ -21,6 +21,10 @@ def generate_images(text, tokenizer, dalle, vae, top_k, top_p, images_num, image
     image_seq_length = dalle.get_param('image_seq_length')
     total_seq_length = dalle.get_param('total_seq_length')
     device = dalle.get_param('device')
+
+    if use_onnx:
+        _dalle = dalle
+        dalle = lambda *args, **kwargs: _dalle.onnx_forward(*args, **kwargs)
 
     text = text.lower().strip()
     input_ids = tokenizer.encode_text(text, text_seq_length=text_seq_length)

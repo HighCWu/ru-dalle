@@ -183,3 +183,38 @@ class DalleModel(torch.nn.Module):
         self._mask_map = [mask.to(device) for mask in self._mask_map]
         self.transformer._mask_map = [mask.to(device) for mask in self.transformer._mask_map]
         return super().to(device, *args, **kwargs)
+
+    def set_onnx(self, onnx_file):
+        import onnxruntime as ort
+        self.ort_sess = ort.InferenceSession(onnx_file)
+
+    def onnx_forward(
+            self,
+            input_ids,
+            attention_mask,
+            caches=[],
+            use_cache: bool=False
+    ):
+        assert hasattr(self, 'ort_sess')
+        import numpy as np
+
+        if len(caches) == 0:
+            caches_shape = self.ort_sess.get_inputs()[2].shape
+            caches = torch.randn(
+                caches_shape[0], input_ids.shape[0], 1, 
+                dtype=attention_mask.dtype, device=input_ids.device
+            )
+        
+        inputs = {
+            'input_ids': input_ids.detach().cpu().numpy(),
+            'attention_mask': attention_mask.detach().cpu().numpy(), 
+            'caches': caches.detach().cpu().numpy(),
+            'use_cache': np.asarray(use_cache)
+        }
+
+        logits, present_caches = self.ort_sess.run(None, inputs)
+
+        logits = torch.from_numpy(logits).to(input_ids.device)
+        present_caches = torch.from_numpy(present_caches).to(input_ids.device)
+
+        return logits, present_caches
