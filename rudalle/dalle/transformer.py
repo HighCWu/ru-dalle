@@ -49,6 +49,8 @@ class DalleTransformer(torch.nn.Module):
                  layernorm_epsilon=1.0e-5, cogview_sandwich_layernorm=False, cogview_pb_relax=False):
         super(DalleTransformer, self).__init__()
 
+        self.hidden_size = hidden_size
+
         # CogView stabilization of training features, see chapter 2.4 https://arxiv.org/pdf/2105.13290.pdf
         self.cogview_pb_relax = cogview_pb_relax
 
@@ -68,15 +70,18 @@ class DalleTransformer(torch.nn.Module):
         # Final layer norm before output.
         self.final_layernorm = LayerNorm(hidden_size, eps=layernorm_epsilon)
 
-    def forward(self, hidden_states, attention_mask, caches: List[torch.Tensor], use_cache: bool=False):
-        new_caches = []
+    def forward(self, hidden_states, attention_mask, caches, use_cache: bool=False):
+        base = self.hidden_size * 4
+        new_caches = torch.zeros(base*len(self.layers), hidden_states.shape[0], hidden_states.shape[1])
         for i, layer in enumerate(self.layers):
             mask = attention_mask
             if len(self._mask_map):
                 layer_mask = self._mask_map[i][:mask.size(2), :mask.size(3)]
                 mask = torch.mul(attention_mask, layer_mask)
-            hidden_states, present_caches = layer(hidden_states, mask, caches=caches[i*4:(i+1)*4], use_cache=use_cache)
-            new_caches += present_caches
+            hidden_states, present_caches = layer(
+                hidden_states, mask, caches=caches[i*base:(i+1)*base], use_cache=use_cache
+            )
+            new_caches[i*base:(i+1)*base] = present_caches
         output = self.final_layernorm(hidden_states)
         return output, new_caches
 
@@ -141,7 +146,7 @@ class DalleTransformerLayer(torch.nn.Module):
         # MLP
         self.mlp = DalleMLP(hidden_size, output_dropout_prob)
 
-    def forward(self, hidden_states, ltor_mask, caches: List[torch.Tensor], use_cache: bool=False):
+    def forward(self, hidden_states, ltor_mask, caches, use_cache: bool=False):
         # hidden_states: [b, s, h]
         # ltor_mask: [1, 1, s, s]
 
@@ -171,7 +176,7 @@ class DalleTransformerLayer(torch.nn.Module):
         # Second residual connection.
         output = layernorm_input + mlp_output
 
-        return output, att_caches + mlp_caches
+        return output, torch.cat([att_caches, mlp_caches], 0)
 
 
 class DalleSelfAttention(torch.nn.Module):
@@ -218,12 +223,11 @@ class DalleSelfAttention(torch.nn.Module):
 
     def _transpose_for_scores(self, tensor):
         """ Transpose a 3D tensor [b, s, np*hn] into a 4D tensor with size [b, np, s, hn]. """
-        new_tensor_shape = tensor.size()[:-1] + (self.num_attention_heads, self.hidden_size_per_attention_head)
-        tensor = tensor.view(new_tensor_shape[0], new_tensor_shape[1], new_tensor_shape[2], new_tensor_shape[3])
+        tensor = tensor.view(tensor.shape[0], tensor.shape[1], self.num_attention_heads, self.hidden_size_per_attention_head)
         return tensor.permute(0, 2, 1, 3)
 
     def _calculate_attention_scores(self, query_layer, key_layer, ltor_mask):
-        key_t = key_layer.transpose(-1, -2)
+        key_t = key_layer.permute(0, 1, 3, 2)
         if self.cogview_pb_relax:
             attention_scores = torch.matmul(
                 query_layer / math.sqrt(self.hidden_size_per_attention_head),
@@ -246,7 +250,7 @@ class DalleSelfAttention(torch.nn.Module):
             attention_scores = (attention_scores_scaled - attention_scores_scaled_maxes) * alpha
         return attention_scores
 
-    def forward(self, hidden_states, ltor_mask, caches: List[torch.Tensor], use_cache: bool=False):
+    def forward(self, hidden_states, ltor_mask, caches, use_cache: bool=False):
         # hidden_states: [b, s, h]
         # ltor_mask: [1, 1, s, s]
         # Attention heads. [b, s, hp]
@@ -257,25 +261,33 @@ class DalleSelfAttention(torch.nn.Module):
 
         (mixed_query_layer,
          mixed_key_layer,
-         mixed_value_layer) = split_tensor_along_last_dim(mixed_x_layer, 3)
+         mixed_value_layer) = (
+         mixed_x_layer[:,:,:self.hidden_size], 
+         mixed_x_layer[:,:,self.hidden_size:self.hidden_size*2],
+         mixed_x_layer[:,:,self.hidden_size*2:self.hidden_size*3])
 
         query_layer = self._transpose_for_scores(mixed_query_layer)
-        key_layer = self._transpose_for_scores(mixed_key_layer)
-        value_layer = self._transpose_for_scores(mixed_value_layer)
 
         if use_cache:
-            past_key, past_value = caches[0], caches[1]
-            key_layer = torch.cat((past_key, key_layer), dim=-2)
-            value_layer = torch.cat((past_value, value_layer), dim=-2)
+            past_key = caches[:self.hidden_size].permute(1,2,0)
+            past_value = caches[self.hidden_size:self.hidden_size*2].permute(1,2,0)
+            key_layer = _key_layer = torch.cat((past_key, mixed_key_layer), dim=-2)
+            value_layer = _value_layer = torch.cat((past_value, mixed_value_layer), dim=-2)
+            key_layer = self._transpose_for_scores(key_layer)
+            value_layer = self._transpose_for_scores(value_layer)
             attention_scores = self._calculate_attention_scores(
                 query_layer=query_layer, key_layer=key_layer, ltor_mask=ltor_mask
             )
+            past_key = _key_layer.permute(2,0,1)
+            past_value = _value_layer.permute(2,0,1)
         else:
+            past_key = mixed_key_layer.permute(2,0,1)
+            past_value = mixed_value_layer.permute(2,0,1)
+            key_layer = self._transpose_for_scores(mixed_key_layer)
+            value_layer = self._transpose_for_scores(mixed_value_layer)
             attention_scores = self._calculate_attention_scores(
                 query_layer=query_layer, key_layer=key_layer, ltor_mask=ltor_mask
             )
-        past_key = key_layer
-        past_value = value_layer
 
         if use_cache:
             attention_scores = attention_scores[..., -1:, :]
@@ -294,21 +306,20 @@ class DalleSelfAttention(torch.nn.Module):
         # [b, s, np, hn]
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
-        new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size,)
         # [b, s, hp]
-        context_layer = context_layer.view(new_context_layer_shape[0], new_context_layer_shape[1], new_context_layer_shape[2])
+        context_layer = context_layer.view(context_layer.shape[0], context_layer.shape[1], self.hidden_size)
 
         # Output. [b, s, h]
         output = self.dense(context_layer)
 
         if use_cache:
-            past_output = caches[2]
+            past_output = caches[self.hidden_size*2:self.hidden_size*3].permute(1,2,0)
             output = torch.cat((past_output, output), dim=-2)
         
-        past_output = output
+        past_output = output.permute(2,0,1)
 
         output = self.output_dropout(output)
-        return output, [past_key, past_value, past_output]
+        return output, torch.cat([past_key, past_value, past_output], 0)
 
 
 class DalleMLP(torch.nn.Module):
@@ -325,6 +336,7 @@ class DalleMLP(torch.nn.Module):
 
     def __init__(self, hidden_size, output_dropout_prob):
         super(DalleMLP, self).__init__()
+        self.hidden_size = hidden_size
         # Project to 4h.
         self.dense_h_to_4h = torch.nn.Linear(hidden_size, 4*hidden_size)
         # Project back to h.
@@ -333,7 +345,7 @@ class DalleMLP(torch.nn.Module):
         # MLP cache
         self.past_x = None
 
-    def forward(self, hidden_states, caches: List[torch.Tensor], use_cache: bool=False):
+    def forward(self, hidden_states, caches, use_cache: bool=False):
         if use_cache:
             hidden_states = hidden_states[:, -1:]
 
@@ -343,10 +355,10 @@ class DalleMLP(torch.nn.Module):
         # [b, s, h]
         x = self.dense_4h_to_h(x)
         if use_cache:
-            past_x = caches[-1]
+            past_x = caches[-self.hidden_size:].permute(1,2,0)
             x = torch.cat((past_x, x), dim=-2)
-        past_x = x
+        past_x = x.permute(2,0,1)
         
         output = self.dropout(x)
 
-        return output, [past_x]
+        return output, past_x

@@ -106,8 +106,8 @@ class DalleModel(torch.nn.Module):
 
     def get_image_pos_embeddings(self, image_input_ids, past_length:int=0):
         input_shape = image_input_ids.size()
-        row_ids = torch.arange(past_length, input_shape[-1] + past_length,
-                               dtype=torch.long, device=self.device) // self.image_tokens_per_dim
+        row_ids = torch.div(torch.arange(past_length, input_shape[-1] + past_length,
+                               dtype=torch.long, device=self.device), self.image_tokens_per_dim, rounding_mode='floor')
         row_ids = row_ids.unsqueeze(0).view(-1, input_shape[-1])
         col_ids = torch.arange(past_length, input_shape[-1] + past_length,
                                dtype=torch.long, device=self.device) % self.image_tokens_per_dim
@@ -118,9 +118,8 @@ class DalleModel(torch.nn.Module):
             self,
             input_ids,
             attention_mask,
-            caches: List[torch.Tensor],
-            use_cache: bool=False,
-            return_loss: bool=False,
+            caches,
+            use_cache: bool=False
     ):
         text = input_ids[:, :self.text_seq_length]
         text_range = torch.arange(self.text_seq_length)
@@ -152,11 +151,19 @@ class DalleModel(torch.nn.Module):
             embeddings, attention_mask, caches=caches, use_cache=use_cache)
 
         logits = self.to_logits(transformer_output)
-        if return_loss is False:
-            return logits, present_caches
+        return logits, present_caches
+
+    def loss(input_ids, logits):
+        text = input_ids[:, :self.text_seq_length]
+        text_range = torch.arange(self.text_seq_length)
+        text_range += (self.vocab_size - self.text_seq_length)
+        text_range = text_range # .to(self.device)
+        text = torch.where(text == 0, text_range, text)
+        # some hardcode :)
+        text = F.pad(text, (1, 0), value=2)
 
         labels = torch.cat((text[:, 1:], image_input_ids), dim=1).contiguous().long()
-        logits = logits.transpose(1,2) # rearrange(logits, 'b n c -> b c n')
+        logits = rearrange(logits, 'b n c -> b c n')
 
         text_logits = logits[:, :self.vocab_size, :self.text_seq_length].contiguous().float()
         image_logits = logits[:, self.vocab_size:, self.text_seq_length:].contiguous().float()
@@ -169,8 +176,7 @@ class DalleModel(torch.nn.Module):
             labels[:, self.text_seq_length:])
 
         loss = (loss_text + self.loss_img_weight * loss_img) / (self.loss_img_weight + 1)
-        # return loss, {'text': loss_text.data.detach().float(), 'image': loss_img.data.detach().float()}
-        return loss, [loss_text.data.detach().float(), loss_img.data.detach().float()]
+        return loss, {'text': loss_text.data.detach().float(), 'image': loss_img.data.detach().float()}
 
     def to(self, device, *args, **kwargs):
         self.device = device

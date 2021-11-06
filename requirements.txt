@@ -7,3 +7,5 @@ einops~=0.3.2
 torch
 torchvision
 matplotlib
+onnx~=1.10.2
+onnxruntime~=1.9.0

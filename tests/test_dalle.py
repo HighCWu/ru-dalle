@@ -26,6 +26,7 @@ def test_forward_step_and_criterion(text, sample_image, yttm_tokenizer, vae, sma
     with torch.no_grad():
         image_input_ids = vae.get_codebook_indices(images)
         input_ids = torch.cat((text_input_ids, image_input_ids), dim=1)
-        loss, loss_values = small_dalle.forward(input_ids, attention_mask, [], return_loss=True)
+        logits, caches = small_dalle.forward(input_ids, attention_mask, [], return_loss=True)
+        loss, loss_values = small_dalle.loss(input_ids, logits)
         assert type(loss.data.detach().item()) == float
         assert type(loss_values) == list
