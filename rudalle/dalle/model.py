@@ -122,9 +122,8 @@ class DalleModel(torch.nn.Module):
             use_cache: bool=False
     ):
         text = input_ids[:, :self.text_seq_length]
-        text_range = torch.arange(self.text_seq_length)
+        text_range = torch.arange(self.text_seq_length, device=self.device)
         text_range += (self.vocab_size - self.text_seq_length)
-        text_range = text_range # .to(self.device)
         text = torch.where(text == 0, text_range, text)
         # some hardcode :)
         text = F.pad(text, (1, 0), value=2.0)
@@ -155,9 +154,8 @@ class DalleModel(torch.nn.Module):
 
     def loss(input_ids, logits):
         text = input_ids[:, :self.text_seq_length]
-        text_range = torch.arange(self.text_seq_length)
+        text_range = torch.arange(self.text_seq_length, device=self.device)
         text_range += (self.vocab_size - self.text_seq_length)
-        text_range = text_range # .to(self.device)
         text = torch.where(text == 0, text_range, text)
         # some hardcode :)
         text = F.pad(text, (1, 0), value=2)
@@ -218,3 +216,4 @@ class DalleModel(torch.nn.Module):
         present_caches = torch.from_numpy(present_caches).to(input_ids.device)
 
         return logits, present_caches
+ 
