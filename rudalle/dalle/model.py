@@ -121,35 +121,17 @@ class DalleModel(torch.nn.Module):
             input_ids,
             attention_mask,
             caches,
-            use_cache: bool=False,
-            fast_convert: bool=False
+            use_cache: bool=False
     ):
-        text_seq_length = 1 if fast_convert else self.text_seq_length
-        text = input_ids[:, :text_seq_length]
-        text_range = torch.arange(text_seq_length, device=self.device)
-        text_range += (self.vocab_size - self.text_seq_length)
-        text = torch.where(text == 0, text_range, text)
-        # some hardcode :)
-        text = F.pad(text, (1, 0), value=2.0)
-        text_embeddings = self.text_embeddings(text) + \
-            self.text_pos_embeddings(torch.arange(text.shape[1], device=self.device))
+        if hasattr(self, 'onnx_model'):
+            return self.onnx_forward(
+                input_ids,
+                attention_mask,
+                caches,
+                use_cache
+            )
+        embeddings, attention_mask = self.embedding(input_ids, attention_mask)
 
-        image_input_ids = input_ids[:, text_seq_length:]
-
-        if exists(image_input_ids) and not is_empty(image_input_ids):
-            image_embeddings = self.image_embeddings(image_input_ids) + \
-                self.get_image_pos_embeddings(image_input_ids, past_length=0)
-            embeddings = torch.cat((text_embeddings, image_embeddings), dim=1)
-        else:
-            embeddings = text_embeddings
-        # some hardcode :)
-        if embeddings.shape[1] > self.total_seq_length:
-            embeddings = embeddings[:, :-1]
-
-        alpha = 0.1
-        embeddings = embeddings * alpha + embeddings.detach() * (1-alpha)
-
-        attention_mask = attention_mask[:, :, :embeddings.shape[1], :embeddings.shape[1]]
         transformer_output, present_caches = self.transformer(
             embeddings, attention_mask, caches=caches, use_cache=use_cache)
 
@@ -186,40 +168,60 @@ class DalleModel(torch.nn.Module):
         self.transformer._mask_map = [mask.to(device) for mask in self.transformer._mask_map]
         return super().to(device, *args, **kwargs)
 
-    def set_onnx(self, onnx_file):
-        import onnxruntime as ort
-        self.ort_sess = ort.InferenceSession(onnx_file)
+    def embedding(
+            self,
+            input_ids,
+            attention_mask,
+    ):
+        text = input_ids[:, :self.text_seq_length]
+        text_range = torch.arange(self.text_seq_length, device=self.device)
+        text_range += (self.vocab_size - self.text_seq_length)
+        text = torch.where(text == 0, text_range, text)
+        # some hardcode :)
+        text = F.pad(text, (1, 0), value=2.0)
+        text_embeddings = self.text_embeddings(text) + \
+            self.text_pos_embeddings(torch.arange(text.shape[1], device=self.device))
+
+        image_input_ids = input_ids[:, self.text_seq_length:]
+
+        if exists(image_input_ids) and not is_empty(image_input_ids):
+            image_embeddings = self.image_embeddings(image_input_ids) + \
+                self.get_image_pos_embeddings(image_input_ids, past_length=0)
+            embeddings = torch.cat((text_embeddings, image_embeddings), dim=1)
+        else:
+            embeddings = text_embeddings
+        # some hardcode :)
+        if embeddings.shape[1] > self.total_seq_length:
+            embeddings = embeddings[:, :-1]
+
+        alpha = 0.1
+        embeddings = embeddings * alpha + embeddings.detach() * (1-alpha)
+
+        attention_mask = attention_mask[:, :, :embeddings.shape[1], :embeddings.shape[1]]
+
+        return embeddings, attention_mask
+
+    def set_onnx(self, onnx_dir):
+        from rudalle.onnx.dalle import DalleONNXModel
+        self.onnx_model = DalleONNXModel(onnx_dir, self.device)
 
     def onnx_forward(
             self,
             input_ids,
             attention_mask,
             caches=[],
-            use_cache: bool=False,
-            fast_convert: bool=False
+            use_cache: bool=False
     ):
-        assert hasattr(self, 'ort_sess')
-        import numpy as np
+        input_ids = input_ids.detach().cpu().numpy()
+        attention_mask = attention_mask.detach().cpu().numpy()
 
-        if len(caches) == 0:
-            caches_shape = self.ort_sess.get_inputs()[2].shape
-            caches = torch.randn(
-                caches_shape[0], input_ids.shape[0], 1, 
-                dtype=attention_mask.dtype, device=input_ids.device
-            )
-        
-        inputs = {
-            'input_ids': input_ids.detach().cpu().numpy(),
-            'attention_mask': attention_mask.detach().cpu().numpy(), 
-            'caches': caches.detach().cpu().numpy(),
-            'use_cache': np.asarray(use_cache),
-            'fast_convert': np.asarray(fast_convert)
-        }
-
-        logits, present_caches = self.ort_sess.run(None, inputs)
-
-        logits = torch.from_numpy(logits).to(input_ids.device)
-        present_caches = torch.from_numpy(present_caches).to(input_ids.device)
+        # Note: present_caches are OrtValue types
+        logits, present_caches = self.onnx_model(
+            input_ids,
+            attention_mask,
+            caches,
+            use_cache
+        )
+        logits = torch.from_numpy(logits)
 
         return logits, present_caches
- 

@@ -3,8 +3,8 @@ import torch
 import pytest
 
 from .test_vae import preprocess
-from rudalle.convert_to_onnx import convert_dalle
-from tempfile import NamedTemporaryFile
+from rudalle.onnx.dalle import convert_dalle
+from tempfile import TemporaryDirectory
 
 
 @pytest.mark.parametrize('text', [
@@ -33,16 +33,14 @@ def test_dalle_onnx(text, sample_image, yttm_tokenizer, vae, small_dalle):
         input_ids2 = torch.cat([input_ids, input_ids[:,:1]], 1)
         logits2, caches2 = small_dalle.forward(input_ids2, attention_mask, caches, True)
 
-    f = NamedTemporaryFile(delete=False)
+    f = TemporaryDirectory()
     convert_dalle(small_dalle, f.name)
     small_dalle.set_onnx(f.name)
 
-    _logits, _caches = small_dalle.onnx_forward(input_ids, attention_mask, [], False)
+    _logits, _caches = small_dalle.forward(input_ids, attention_mask, [], False)
     _logits2, _caches2 = small_dalle.forward(input_ids2, attention_mask, _caches, True)
 
-    assert (logits - _logits).pow(2).mean().item() < 1e-9
-    assert (logits2 - _logits2).pow(2).mean().item() < 1e-9
-    assert (caches - _caches).pow(2).mean().item() < 1e-9
-    assert (caches2 - _caches2).pow(2).mean().item() < 1e-9
+    assert (logits - _logits).pow(2).mean().item() < 1e-6
+    assert (logits2 - _logits2).pow(2).mean().item() < 1e-6
 
-    f.close()
+    f.cleanup()

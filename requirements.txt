@@ -8,4 +8,5 @@ torch>=1.10.0
 torchvision
 matplotlib
 onnx~=1.10.2
+onnxmltools~=1.10.0
 onnxruntime~=1.9.0
