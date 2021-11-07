@@ -83,7 +83,7 @@ class DalleONNXModel(object):
         self.transformer_final_norm = ort.InferenceSession(os.path.join(save_dir, prefix + 'trans_final_norm.onnx'))
         self.to_logits = ort.InferenceSession(os.path.join(save_dir, prefix + 'to_logits.onnx'))
         self.device = device
-        assert device == 'cpu' or device == 'cuda'
+        assert 'cpu' in device or 'cuda' in device, f'device {device} is not supported'
 
     def __call__(
         self,

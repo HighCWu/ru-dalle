@@ -4,6 +4,7 @@ import pytest
 
 from .test_vae import preprocess
 from rudalle.onnx.dalle import convert_dalle
+from rudalle.onnx.vae import convert_vae
 from tempfile import TemporaryDirectory
 
 
@@ -42,5 +43,25 @@ def test_dalle_onnx(text, sample_image, yttm_tokenizer, vae, small_dalle):
 
     assert (logits - _logits).pow(2).mean().item() < 1e-6
     assert (logits2 - _logits2).pow(2).mean().item() < 1e-6
+
+    f.cleanup()
+
+
+def test_vae_onnx(vae):
+    device = next(vae.parameters()).device
+    img = torch.zeros(1,3,128,128).to(device)
+    with torch.no_grad():
+        img_seq = vae.get_codebook_indices(img)
+        img_rec = vae.decode(img_seq)
+
+    f = TemporaryDirectory()
+    convert_vae(vae, f.name)
+    vae.set_onnx(f.name)
+
+    img_seq2 = vae.get_codebook_indices(img)
+    img_rec2 = vae.decode(img_seq)
+
+    assert img_seq.shape == img_seq2.shape
+    assert img_rec.shape == img_rec2.shape
 
     f.cleanup()

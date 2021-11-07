@@ -25,18 +25,50 @@ class VQGanGumbelVAE(torch.nn.Module):
         self.num_tokens = config.model.params.n_embed
 
     @torch.no_grad()
-    def get_codebook_indices(self, img):
+    def _get_codebook_indices(self, img):
         img = (2 * img) - 1
         _, _, [_, _, indices] = self.model.encode(img)
-        return indices.reshape(indices.shape[0], -1) # rearrange(indices, 'b h w -> b (h w)')
 
-    def decode(self, img_seq):
-        b, n = img_seq.shape
+        # rearrange(indices, 'b h w -> b (h w)')
+        return indices.reshape(indices.shape[0], -1), indices.shape[1], indices.shape[2]
+
+    @torch.no_grad()
+    def get_codebook_indices(self, img):
+        if hasattr(self, 'onnx_model'):
+            return self.onnx_get_codebook_indices(img)[0]
+        return self._get_codebook_indices(img)[0]
+
+    def _decode(self, img_seq, height, width):
+        b = img_seq.shape[0]
         one_hot_indices = torch.nn.functional.one_hot(img_seq, num_classes=self.num_tokens).float()
         z = (one_hot_indices @ self.model.quantize.embed.weight)
-        z = z.reshape(b, int(sqrt(n)), int(sqrt(n)), -1).permute(0,3,1,2) # rearrange(z, 'b (h w) c -> b c h w', h=int(sqrt(n)))
+        z = z.reshape(b, height, width, -1).permute(0,3,1,2) # rearrange(z, 'b (h w) c -> b c h w', h=height))
         img = self.model.decode(z)
         img = (img.clamp(-1., 1.) + 1) * 0.5
+        return img
+
+    def decode(self, img_seq):
+        _, n = img_seq.shape
+        h, w = int(sqrt(n)), int(sqrt(n))
+        if hasattr(self, 'onnx_model'):
+            return self.onnx_decode(img_seq, h, w)
+        return self._decode(img_seq, h, w)
+
+    def set_onnx(self, onnx_dir):
+        device = next(self.parameters()).device.type
+        from rudalle.onnx.vae import VQGanGumbelVAEONNX
+        self.onnx_model = VQGanGumbelVAEONNX(onnx_dir, device)
+
+    def onnx_get_codebook_indices(self, img):
+        device = next(self.parameters()).device
+        img_seq, height, width = self.onnx_model.get_codebook_indices(img.cpu().detach().numpy())
+        img_seq = torch.from_numpy(img_seq).long().to(device)
+        return img_seq, height, width
+        
+    def onnx_decode(self, img_seq, height, width):
+        device = next(self.parameters()).device
+        img = self.onnx_model.decode(img_seq.cpu().detach().numpy(), height, width)
+        img = torch.from_numpy(img).float().to(device)
         return img
 
 

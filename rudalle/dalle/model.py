@@ -145,7 +145,7 @@ class DalleModel(torch.nn.Module):
         text = torch.where(text == 0, text_range, text)
         # some hardcode :)
         text = F.pad(text, (1, 0), value=2)
-        
+
         image_input_ids = input_ids[:, self.text_seq_length:]
 
         labels = torch.cat((text[:, 1:], image_input_ids), dim=1).contiguous().long()
@@ -224,6 +224,6 @@ class DalleModel(torch.nn.Module):
             caches,
             use_cache
         )
-        logits = torch.from_numpy(logits)
+        logits = torch.from_numpy(logits).to(self.device)
 
         return logits, present_caches
