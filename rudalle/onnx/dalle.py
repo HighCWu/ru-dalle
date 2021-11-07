@@ -64,13 +64,24 @@ class ToLogits(nn.Module):
 
 
 class DalleONNXModel(object):
-    def __init__(self, save_dir, device):
-        self.embedding = ort.InferenceSession(os.path.join(save_dir, 'embedding.onnx'))
+    def __init__(self, save_dir, device, use_fp16=False):
+        prefix = ''
+        if use_fp16:
+            prefix = 'fp16_'
+            if len(glob.glob(os.path.join(save_dir, prefix + '*.onnx'))) == 0:
+                onnxfiles = os.listdir(save_dir)
+                for file in onnxfiles:
+                    if '.onnx' in file and 'fp16_' not in file:
+                        onnx_model = onnxmltools.utils.load_model(os.path.join(save_dir, file))
+                        onnx_model = convert_float_to_float16(onnx_model)
+                        onnxmltools.utils.save_model(onnx_model, os.path.join(save_dir, prefix + file))
+        self.dtype = np.float16 if use_fp16 else np.float32
+        self.embedding = ort.InferenceSession(os.path.join(save_dir, prefix + 'embedding.onnx'))
         self.transformers = [
-            ort.InferenceSession(path) for path in sorted(glob.glob(os.path.join(save_dir, 'transformer_*.onnx')))
+            ort.InferenceSession(path) for path in sorted(glob.glob(os.path.join(save_dir, prefix + 'transformer_*.onnx')))
         ]
-        self.transformer_final_norm = ort.InferenceSession(os.path.join(save_dir, 'trans_final_norm.onnx'))
-        self.to_logits = ort.InferenceSession(os.path.join(save_dir, 'to_logits.onnx'))
+        self.transformer_final_norm = ort.InferenceSession(os.path.join(save_dir, prefix + 'trans_final_norm.onnx'))
+        self.to_logits = ort.InferenceSession(os.path.join(save_dir, prefix + 'to_logits.onnx'))
         self.device = device
         assert device == 'cpu' or device == 'cuda'
 
@@ -83,8 +94,8 @@ class DalleONNXModel(object):
     ):
         device = self.device
         batch_size = input_ids.shape[0]
-        input_ids = ort.OrtValue.ortvalue_from_numpy(input_ids, device, 0)
-        attention_mask = ort.OrtValue.ortvalue_from_numpy(attention_mask.astype(np.float16), device, 0)
+        input_ids = ort.OrtValue.ortvalue_from_numpy(input_ids.astype(np.int64), device, 0)
+        attention_mask = ort.OrtValue.ortvalue_from_numpy(attention_mask.astype(self.dtype), device, 0)
         use_cache = ort.OrtValue.ortvalue_from_numpy(np.asarray(use_cache), device, 0)
         io_binding = self.embedding.io_binding()
         io_binding.bind_ortvalue_input("input_ids", input_ids)
@@ -103,7 +114,7 @@ class DalleONNXModel(object):
                 caches_shape = transformer.get_inputs()[2].shape
                 _caches = np.zeros(
                     [caches_shape[0], batch_size, 1], 
-                    dtype=np.float16
+                    dtype=self.dtype
                 )
                 _caches = ort.OrtValue.ortvalue_from_numpy(_caches, device, 0)
             else:
@@ -132,8 +143,9 @@ class DalleONNXModel(object):
 
 
 def convert_dalle(dalle, save_dir):
-    if hasattr(dalle, 'module'):
-        dalle = dalle.module
+
+    assert not hasattr(dalle, 'module'), "FP16 Module is not supported"
+    
     os.makedirs(save_dir, exist_ok=True)
 
     vocab_size = dalle.get_param('vocab_size')
@@ -183,9 +195,6 @@ def convert_dalle(dalle, save_dir):
             opset_version=11,
             f=save_path, 
             verbose=False)
-        onnx_model = onnxmltools.utils.load_model(save_path)
-        onnx_model = convert_float_to_float16(onnx_model)
-        onnxmltools.utils.save_model(onnx_model, save_path)
 
         return embeddings, _attention_mask
 
@@ -237,9 +246,6 @@ def convert_dalle(dalle, save_dir):
             opset_version=11,
             f=save_path, 
             verbose=False)
-        onnx_model = onnxmltools.utils.load_model(save_path)
-        onnx_model = convert_float_to_float16(onnx_model)
-        onnxmltools.utils.save_model(onnx_model, save_path)
 
         return _hidden_states
 
@@ -274,9 +280,6 @@ def convert_dalle(dalle, save_dir):
             opset_version=11,
             f=save_path, 
             verbose=False)
-        onnx_model = onnxmltools.utils.load_model(save_path)
-        onnx_model = convert_float_to_float16(onnx_model)
-        onnxmltools.utils.save_model(onnx_model, save_path)
 
         return transformer_output
 
@@ -310,9 +313,6 @@ def convert_dalle(dalle, save_dir):
             opset_version=11,
             f=save_path, 
             verbose=False)
-        onnx_model = onnxmltools.utils.load_model(save_path)
-        onnx_model = convert_float_to_float16(onnx_model)
-        onnxmltools.utils.save_model(onnx_model, save_path)
 
         return logits
 

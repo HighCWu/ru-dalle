@@ -29,4 +29,4 @@ def test_forward_step_and_criterion(text, sample_image, yttm_tokenizer, vae, sma
         logits, caches = small_dalle.forward(input_ids, attention_mask, [])
         loss, loss_values = small_dalle.loss(input_ids, logits)
         assert type(loss.data.detach().item()) == float
-        assert type(loss_values) == list
+        assert type(loss_values) == dict

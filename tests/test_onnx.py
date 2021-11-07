@@ -35,7 +35,7 @@ def test_dalle_onnx(text, sample_image, yttm_tokenizer, vae, small_dalle):
 
     f = TemporaryDirectory()
     convert_dalle(small_dalle, f.name)
-    small_dalle.set_onnx(f.name)
+    small_dalle.set_onnx(f.name, use_fp16=True)
 
     _logits, _caches = small_dalle.forward(input_ids, attention_mask, [], False)
     _logits2, _caches2 = small_dalle.forward(input_ids2, attention_mask, _caches, True)

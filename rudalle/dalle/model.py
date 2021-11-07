@@ -138,13 +138,15 @@ class DalleModel(torch.nn.Module):
         logits = self.to_logits(transformer_output)
         return logits, present_caches
 
-    def loss(input_ids, logits):
+    def loss(self, input_ids, logits):
         text = input_ids[:, :self.text_seq_length]
         text_range = torch.arange(self.text_seq_length, device=self.device)
         text_range += (self.vocab_size - self.text_seq_length)
         text = torch.where(text == 0, text_range, text)
         # some hardcode :)
         text = F.pad(text, (1, 0), value=2)
+        
+        image_input_ids = input_ids[:, self.text_seq_length:]
 
         labels = torch.cat((text[:, 1:], image_input_ids), dim=1).contiguous().long()
         logits = rearrange(logits, 'b n c -> b c n')
@@ -201,9 +203,9 @@ class DalleModel(torch.nn.Module):
 
         return embeddings, attention_mask
 
-    def set_onnx(self, onnx_dir):
+    def set_onnx(self, onnx_dir, use_fp16=False):
         from rudalle.onnx.dalle import DalleONNXModel
-        self.onnx_model = DalleONNXModel(onnx_dir, self.device)
+        self.onnx_model = DalleONNXModel(onnx_dir, self.device, use_fp16)
 
     def onnx_forward(
             self,
